@@ -27,14 +27,14 @@ class UserEmailForgotController extends Controller
     public function store(Request $request)
     {
         $rules = [
-            'username' => 'required|min:2|max:15|exists:users'
+            'username' => 'required|min:2|max:30|exists:users'
         ];
 
         $messages = [
             'username.exists' => 'This username is no longer active or does not exist!'
         ];
 
-        if(config('captcha.enabled') || config('captcha.active.login') || config('captcha.active.register')) {
+        if((bool) config_cache('captcha.enabled')) {
             $rules['h-captcha-response'] = 'required|captcha';
             $messages['h-captcha-response.required'] = 'You need to complete the captcha!';
         }

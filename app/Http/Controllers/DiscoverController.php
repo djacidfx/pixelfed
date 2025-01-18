@@ -5,9 +5,13 @@ namespace App\Http\Controllers;
 use App\Hashtag;
 use App\Instance;
 use App\Like;
+use App\Services\AccountService;
+use App\Services\AdminShadowFilterService;
 use App\Services\BookmarkService;
 use App\Services\ConfigCacheService;
+use App\Services\FollowerService;
 use App\Services\HashtagService;
+use App\Services\Internal\BeagleService;
 use App\Services\LikeService;
 use App\Services\ReblogService;
 use App\Services\SnowflakeService;
@@ -186,6 +190,7 @@ class DiscoverController extends Controller
         })->filter(function ($s) use ($filtered) {
             return
                 $s &&
+                isset($s['account'], $s['account']['id']) &&
                 ! in_array($s['account']['id'], $filtered) &&
                 isset($s['account']);
         })->values();
@@ -376,5 +381,52 @@ class DiscoverController extends Controller
         ConfigCacheService::put('config.discover.features', json_encode($res));
 
         return $res;
+    }
+
+    public function discoverAccountsPopular(Request $request)
+    {
+        abort_if(! $request->user(), 403);
+
+        $pid = $request->user()->profile_id;
+
+        $ids = Cache::remember('api:v1.1:discover:accounts:popular', 14400, function () {
+            return DB::table('profiles')
+                ->where('is_private', false)
+                ->whereNull('status')
+                ->orderByDesc('profiles.followers_count')
+                ->limit(30)
+                ->get();
+        });
+        $filters = UserFilterService::filters($pid);
+        $asf = AdminShadowFilterService::getHideFromPublicFeedsList();
+        $ids = $ids->map(function ($profile) {
+            return AccountService::get($profile->id, true);
+        })
+            ->filter(function ($profile) {
+                return $profile && isset($profile['id'], $profile['locked']) && ! $profile['locked'];
+            })
+            ->filter(function ($profile) use ($pid) {
+                return $profile['id'] != $pid;
+            })
+            ->filter(function ($profile) use ($pid) {
+                return ! FollowerService::follows($pid, $profile['id'], true);
+            })
+            ->filter(function ($profile) use ($asf) {
+                return ! in_array($profile['id'], $asf);
+            })
+            ->filter(function ($profile) use ($filters) {
+                return ! in_array($profile['id'], $filters);
+            })
+            ->take(16)
+            ->values();
+
+        return response()->json($ids, 200, [], JSON_UNESCAPED_SLASHES);
+    }
+
+    public function discoverNetworkTrending(Request $request)
+    {
+        abort_if(! $request->user(), 404);
+
+        return BeagleService::getDiscoverPosts();
     }
 }

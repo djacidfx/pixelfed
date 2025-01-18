@@ -7,10 +7,10 @@ use App\Profile;
 use App\Status;
 use App\Transformer\Api\AccountTransformer;
 use App\Util\ActivityPub\Helpers;
+use DB;
 use Illuminate\Support\Str;
 use League\Fractal;
 use League\Fractal\Serializer\ArraySerializer;
-
 
 class SearchApiV2Service
 {
@@ -119,7 +119,7 @@ class SearchApiV2Service
                 AccountService::get($res['id']);
             })
             ->filter(function ($account) {
-                return $account && isset($account['id']);
+                return $account && isset($account['id']) && ! isset($account['moved'], $account['moved']['id']);
             })
             ->values();
 
@@ -132,17 +132,50 @@ class SearchApiV2Service
         $q = $this->query->input('q');
         $limit = $this->query->input('limit') ?? 20;
         $offset = $this->query->input('offset') ?? 0;
-        $query = Str::startsWith($q, '#') ? substr($q, 1).'%' : $q;
-        $operator = config('database.default') === 'pgsql' ? 'ilike' : 'like';
 
-        return Hashtag::where('name', $operator, $query)
-            ->orderByDesc('cached_count')
+        $query = Str::startsWith($q, '#') ? substr($q, 1) : $q;
+        $query = $query.'%';
+
+        if (config('database.default') === 'pgsql') {
+            $baseQuery = Hashtag::query()
+                ->where('name', 'ilike', $query)
+                ->where('is_banned', false)
+                ->where(function ($q) {
+                    $q->where('can_search', true)
+                        ->orWhereNull('can_search');
+                })
+                ->orderByDesc(DB::raw('COALESCE(cached_count, 0)'))
+                ->offset($offset)
+                ->limit($limit)
+                ->get();
+
+            return $baseQuery
+                ->map(function ($tag) use ($mastodonMode) {
+                    $res = [
+                        'name' => $tag->name,
+                        'url' => $tag->url(),
+                    ];
+
+                    if (! $mastodonMode) {
+                        $res['history'] = [];
+                        $res['count'] = $tag->cached_count ?? 0;
+                    }
+
+                    return $res;
+                })
+                ->values();
+        }
+
+        return Hashtag::where('name', 'like', $query)
+            ->where('is_banned', false)
+            ->where(function ($q) {
+                $q->where('can_search', true)
+                    ->orWhereNull('can_search');
+            })
+            ->orderBy(DB::raw('COALESCE(cached_count, 0)'), 'desc')
             ->offset($offset)
             ->limit($limit)
             ->get()
-            ->filter(function ($tag) {
-                return $tag->can_search != false;
-            })
             ->map(function ($tag) use ($mastodonMode) {
                 $res = [
                     'name' => $tag->name,
@@ -248,7 +281,7 @@ class SearchApiV2Service
 
             if ($sid = Status::whereUri($query)->first()) {
                 $s = StatusService::get($sid->id, false);
-                if (! $s) {
+                if (! $s || isset($s['account']['moved'], $s['account']['moved']['id'])) {
                     return $default;
                 }
                 if (in_array($s['visibility'], ['public', 'unlisted'])) {
@@ -359,7 +392,7 @@ class SearchApiV2Service
             ->whereUsername($query)
             ->first();
 
-        if (! $profile) {
+        if (! $profile || $profile->moved_to_profile_id) {
             return [
                 'accounts' => [],
                 'hashtags' => [],
@@ -367,9 +400,9 @@ class SearchApiV2Service
             ];
         }
 
-        $fractal = new Fractal\Manager();
-        $fractal->setSerializer(new ArraySerializer());
-        $resource = new Fractal\Resource\Item($profile, new AccountTransformer());
+        $fractal = new Fractal\Manager;
+        $fractal->setSerializer(new ArraySerializer);
+        $resource = new Fractal\Resource\Item($profile, new AccountTransformer);
 
         return [
             'accounts' => [$fractal->createData($resource)->toArray()],
@@ -393,9 +426,9 @@ class SearchApiV2Service
             ];
         }
 
-        $fractal = new Fractal\Manager();
-        $fractal->setSerializer(new ArraySerializer());
-        $resource = new Fractal\Resource\Item($profile, new AccountTransformer());
+        $fractal = new Fractal\Manager;
+        $fractal->setSerializer(new ArraySerializer);
+        $resource = new Fractal\Resource\Item($profile, new AccountTransformer);
 
         return [
             'accounts' => [$fractal->createData($resource)->toArray()],
